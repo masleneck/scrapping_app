@@ -1,0 +1,8 @@
+services:
+  dev:
+    build: .
+    container_name: scrapping-dev
+    working_dir: /workspace
+    volumes:
+      - ./:/workspace
+    command: sleep infinity
