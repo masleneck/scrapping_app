@@ -28,7 +28,10 @@ _load_env_file()
 class Settings:
     source_url: str = os.getenv("SOURCE_URL", "http://localhost:8080/flights.html")
     source_urls: str = os.getenv("SOURCE_URLS", "http://localhost:8080/flights.html")
-    events_db_path: str = os.getenv("EVENTS_DB_PATH", "data/events.db")
+    database_url: str = os.getenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://scrapping:scrapping@localhost:5432/scrapping_app",
+    )
 
     def get_source_urls(self) -> list[str]:
         return [url.strip() for url in self.source_urls.split(",") if url.strip()]

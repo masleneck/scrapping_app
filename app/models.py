@@ -44,3 +44,23 @@ class FlightEvent(BaseModel):
 
 class StoredFlightEvent(FlightEvent):
     id: int
+
+
+class FlightEventCreate(BaseModel):
+    event_type: str = Field(
+        description="FLIGHT_DISCOVERED | FLIGHT_TIME_UPDATED | FLIGHT_STATUS_UPDATED"
+    )
+    flight_number: str
+    payload: dict
+    confidence_score: float = Field(ge=0.0, le=1.0)
+    observed_at: datetime | None = None
+    source: str
+
+
+class FlightEventUpdate(BaseModel):
+    event_type: str | None = None
+    flight_number: str | None = None
+    payload: dict | None = None
+    confidence_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    observed_at: datetime | None = None
+    source: str | None = None
