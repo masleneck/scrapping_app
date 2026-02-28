@@ -11,5 +11,6 @@
         "charliermarsh.ruff"
       ]
     }
-  }
+  },
+  "postCreateCommand": "python -m pip install -e .[dev]"
 }
