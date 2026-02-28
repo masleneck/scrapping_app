@@ -1,0 +1,17 @@
+README.md
+pyproject.toml
+app/__init__.py
+app/config.py
+app/main.py
+app/models.py
+app/repository.py
+app/scraper.py
+app/service.py
+scrapping_app.egg-info/PKG-INFO
+scrapping_app.egg-info/SOURCES.txt
+scrapping_app.egg-info/dependency_links.txt
+scrapping_app.egg-info/requires.txt
+scrapping_app.egg-info/top_level.txt
+tests/test_async_pipeline.py
+tests/test_repository.py
+tests/test_scraper.py

@@ -1,3 +1,20 @@
+Metadata-Version: 2.4
+Name: scrapping-app
+Version: 0.1.0
+Summary: Flight data extraction prototype
+Requires-Python: >=3.14
+Description-Content-Type: text/markdown
+Requires-Dist: fastapi>=0.115.0
+Requires-Dist: uvicorn[standard]>=0.30.0
+Requires-Dist: httpx>=0.27.0
+Requires-Dist: beautifulsoup4>=4.12.0
+Requires-Dist: pydantic>=2.8.0
+Requires-Dist: loguru>=0.7.3
+Provides-Extra: dev
+Requires-Dist: pytest>=8.3.0; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.23.0; extra == "dev"
+Requires-Dist: ruff>=0.6.0; extra == "dev"
+
 # scrapping_app
 
 Шаг 3: асинхронный прототип скрапинга рейсов поверх базового scaffold.
