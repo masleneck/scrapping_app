@@ -20,14 +20,22 @@ class FlightStatus(StrEnum):
 
 class FlightSnapshot(BaseModel):
     flight_number: str
+    normalized_flight_number: str | None = None
     direction: Direction
     scheduled_time: datetime | None = None
     estimated_time: datetime | None = None
     actual_time: datetime | None = None
     aircraft_type: str | None = None
     terminal: str | None = None
+    airline_name: str | None = None
+    airline_iata: str | None = None
     status: FlightStatus = FlightStatus.UNKNOWN
     source: str
+    provider: str | None = None
+    parser_strategy: str | None = None
+    source_priority: int = 0
+    source_record_id: str | None = None
+    info_url: str | None = None
     source_timestamp: datetime
 
 

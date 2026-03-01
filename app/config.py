@@ -47,6 +47,12 @@ class Settings:
     real_scrape_retry_backoff_seconds: float = float(
         os.getenv("REAL_SCRAPE_RETRY_BACKOFF_SECONDS", "1.0")
     )
+    real_scrape_enrich_svo_info_enabled: bool = _get_bool_env(
+        "REAL_SCRAPE_ENRICH_SVO_INFO_ENABLED", False
+    )
+    real_scrape_enrich_svo_info_limit: int = int(
+        os.getenv("REAL_SCRAPE_ENRICH_SVO_INFO_LIMIT", "25")
+    )
 
     def get_source_urls(self) -> list[str]:
         return [url.strip() for url in self.source_urls.split(",") if url.strip()]

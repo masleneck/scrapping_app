@@ -1,94 +1,83 @@
 # scrapping_app
 
-Шаг 5: прикладной прототип мониторинга рейсов с real-source ingestion, дедупликацией событий, планировщиком и аналитикой по источникам.
+Прототип резервного канала для УМС: real-source скрейпинг, нормализация рейсов, дедупликация, событийная модель `add/upd/del`, хранение в PostgreSQL и dashboard-аналитика.
 
-## Что уже есть
-- `GET /health` — проверка сервиса.
-- `GET /dashboard` — простой веб-интерфейс (агрегаты + последние события).
-- `GET /flights/scrape` — async сбор рейсов из одного источника (`SOURCE_URL`).
-- `GET /flights/scrape-url?url=...` — скрапинг произвольной страницы (для реальных источников).
-- `GET /flights/scrape-all` — конкурентный async сбор из нескольких источников.
-- `GET /flights/scrape-real` — сбор из реальных источников (официальный `svo.aero` + агрегаторы) с дедупликацией и событиями `RMSEVENT_ADD/UPDATE/DELETE`.
-- `GET /events` — фильтруемый список событий из PostgreSQL.
-- `GET /events/stats` — аналитические агрегаты (`total`, `by_event_type`, `by_source`, `top_flights`).
-- `GET /events/real-stats` — аналитика по real-source (`runs/status/timeline/add-upd-del/active statuses`).
-- `GET /events/{id}` — получение события по ID.
-- `POST /events` — создание события вручную.
-- `PATCH /events/{id}` — обновление события.
-- `DELETE /events/{id}` — удаление события.
-- Alembic миграции для таблиц `flight_events`, `real_source_state`, `real_source_runs`.
-- Репозиторий на async SQLAlchemy + raw SQL (без ORM схем).
-- Фоновый scheduler для периодического real-source сбора и дедупликации.
-- Расширенные логи `rms_ingest`/`rms_source` (success/fail + add/upd/del/unchanged).
+## Что реализовано
+- `GET /health` — статус сервиса.
+- `GET /dashboard` — web-интерфейс:
+  - поиск/фильтры по актуальным рейсам;
+  - таблица parser-performance;
+  - график распределения статусов;
+  - последние события.
+- `GET /flights/scrape-real` — сбор real-source и запись только `RMSEVENT_ADD/UPDATE/DELETE`.
+- `GET /flights/current` — единый реестр актуальных рейсов (без дублей по источникам).
+- `GET /events` / `GET /events/stats` / `GET /events/real-stats`.
+- `POST /admin/cleanup-real-data` — очистка real-source состояния (`flight_current`, `real_source_state`, `real_source_runs`, RMSEVENT в `flight_events`).
 
-## Конфигурация
-Используется `.env` (см. `.env.example`):
-- `SOURCE_URL` — URL одного источника.
-- `SOURCE_URLS` — список URL через запятую для batch-сбора.
-- `DATABASE_URL` — URL PostgreSQL (`postgresql+asyncpg://...`).
-- `REAL_SCRAPE_SCHEDULER_ENABLED` — включение фонового scheduler (`true/false`).
-- `REAL_SCRAPE_INTERVAL_SECONDS` — период планировщика в секундах.
-- `REAL_SCRAPE_RETRY_ATTEMPTS` — число retry для HTTP-запросов к real-source.
-- `REAL_SCRAPE_RETRY_BACKOFF_SECONDS` — базовый backoff между retry.
+## Нормализация и уникальность рейса
+- Номер приводится к единому формату (`normalized_flight_number`), например:
+  - `FV6519`, `SU6519Россия, Аэрофлот`, `SU 6519` -> единый нормализованный вид.
+- Идентификатор экземпляра рейса (`flight_instance_key`) строится по:
+  - `normalized_flight_number + direction + schedule-anchor`.
+- Повтор одного и того же рейса из разных источников схлопывается в одну запись `flight_current`.
+- При конфликте выбирается наиболее актуальный снапшот по времени/приоритету источника/полноте полей.
 
-## Быстрый старт (Docker)
+## Источники
+- `svo_official_bitrix` (`https://www.svo.aero/bitrix/timetable/`).
+- `kupibilet` (embedded + generic parser).
+- `yandex_rasp` (bs4 + regex parser).
+- `tripcom` (generic parser).
+- `flightaware`:
+  - `https://ru.flightaware.com/live/airport/UUEE` (bs4 + regex parser),
+  - sample history page parser.
+
+Это позволяет сравнивать разные стратегии на одном и том же источнике в `parser_performance`.
+
+## Событийная модель
+Используются только 3 типа изменений:
+- `RMSEVENT_ADD` — рейс появился.
+- `RMSEVENT_UPDATE` — изменились данные рейса.
+- `RMSEVENT_DELETE` — рейс исчез из актуального состояния.
+
+## Конфигурация `.env`
+- `SOURCE_URL`
+- `SOURCE_URLS`
+- `DATABASE_URL`
+- `REAL_SCRAPE_SCHEDULER_ENABLED`
+- `REAL_SCRAPE_INTERVAL_SECONDS`
+- `REAL_SCRAPE_RETRY_ATTEMPTS`
+- `REAL_SCRAPE_RETRY_BACKOFF_SECONDS`
+- `REAL_SCRAPE_ENRICH_SVO_INFO_ENABLED`
+- `REAL_SCRAPE_ENRICH_SVO_INFO_LIMIT`
+
+## Быстрый старт
 ```bash
 make build
 make up
 ```
 
-`make build` нужен при первом запуске и после изменений в `requirements.txt`.
-`make up` теперь не делает принудительную пересборку образов.
-
 Проверка:
 ```bash
 curl http://localhost:8000/health
-curl http://localhost:8000/flights/scrape
-curl http://localhost:8000/flights/scrape-real
-curl "http://localhost:8000/flights/scrape-url?url=http://mock-source:8080/flights.html&source=demo_real"
-curl "http://localhost:8000/events/stats"
+curl "http://localhost:8000/flights/scrape-real?persist=true"
+curl "http://localhost:8000/flights/current?limit=20"
 curl "http://localhost:8000/events/real-stats?hours=24"
 ```
 
-Открыть интерфейс:
+Открыть dashboard:
 ```bash
 open http://localhost:8000/dashboard
 ```
 
-## Поддерживаемые HTML-структуры
-1. Таблица `table#flights` (текущий mock-источник).
-2. Generic-таблица с заголовками `Flight/Direction/Status/...` (или русские аналоги `Рейс/Направление/Статус/...`).
-
-## Alembic
+## Миграции
 ```bash
 make db-upgrade
 make db-history
 ```
 
-## Проверка в DBeaver
-Параметры подключения к локальному контейнеру PostgreSQL:
-- Host: `localhost`
-- Port: `5432`
-- Database: `scrapping_app`
-- User: `scrapping`
-- Password: `scrapping`
-
-После `make up` таблица `flight_events` создается миграцией автоматически.
-
-## Поведение при недоступном источнике
-Если источник рейсов недоступен, API возвращает `502` c `detail.error=source_unavailable`.
-
-Если страница загружена, но структура не распознана — `422` c `detail.error=source_parse_error`.
-
-## Реальные источники и ограничения
-- Для `svo.aero` используется JSON endpoint `https://www.svo.aero/bitrix/timetable/`.
-- Для агрегаторов (например, `kupibilet`) используется извлечение встроенных данных страницы.
-- Для источников с anti-bot/challenge фиксируется диагностический статус (`blocked/error`) без попыток обхода защит.
-- Добавлены легальные меры устойчивости: retry/backoff и совместимые header-профили.
-
-## Troubleshooting
-1. `docker compose ps` — проверить, что `app`, `postgres`, `mock-source` в статусе `Up`.
-2. `docker compose logs -f app` — посмотреть ошибки FastAPI/Alembic.
-3. `docker compose logs -f postgres` — проверить готовность БД.
-4. Убедиться, что порты `8000`, `8080`, `5432` не заняты.
-5. Проверить scheduler-логи по ключам `rms_ingest` и `rms_source`.
+## Ограничения и правовой режим
+- Не используется обход CAPTCHA/защит.
+- Используются легальные методы устойчивости:
+  - retry/backoff,
+  - стандартные header-профили,
+  - диагностика `blocked/error`.

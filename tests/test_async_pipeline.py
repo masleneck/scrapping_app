@@ -91,8 +91,20 @@ async def test_fetch_flights_real_sources_collects_reports(
     monkeypatch.setattr(
         "app.scraper.REAL_SOURCE_CONFIGS",
         (
-            RealSourceConfig(source="s1", url="http://s1.local", strategy="mock"),
-            RealSourceConfig(source="s2", url="http://s2.local", strategy="mock"),
+            RealSourceConfig(
+                source="s1",
+                provider="p1",
+                url="http://s1.local",
+                strategy="mock",
+                priority=10,
+            ),
+            RealSourceConfig(
+                source="s2",
+                provider="p2",
+                url="http://s2.local",
+                strategy="mock",
+                priority=10,
+            ),
         ),
     )
     monkeypatch.setattr("app.scraper._scrape_real_source", fake_scrape)
@@ -117,7 +129,7 @@ async def test_snapshots_to_real_source_events_add_and_unchanged() -> None:
     first = await snapshots_to_real_source_events(
         snapshots=[snapshot],
         previous_states=[],
-        deletable_sources={"svo_official"},
+        allow_deletes=True,
     )
     assert first.counts["add"] == 1
     assert first.counts["upd"] == 0
@@ -137,7 +149,7 @@ async def test_snapshots_to_real_source_events_add_and_unchanged() -> None:
     second = await snapshots_to_real_source_events(
         snapshots=[same_state_new_timestamp],
         previous_states=[previous_state],
-        deletable_sources={"svo_official"},
+        allow_deletes=True,
     )
     assert second.counts["add"] == 0
     assert second.counts["upd"] == 0
@@ -159,7 +171,7 @@ async def test_snapshots_to_real_source_events_update_and_delete() -> None:
     baseline = await snapshots_to_real_source_events(
         snapshots=[old_snapshot],
         previous_states=[],
-        deletable_sources={"kupibilet_aggregator"},
+        allow_deletes=True,
     )
     baseline_state = baseline.upserts[0]
 
@@ -174,7 +186,7 @@ async def test_snapshots_to_real_source_events_update_and_delete() -> None:
     updated = await snapshots_to_real_source_events(
         snapshots=[updated_snapshot],
         previous_states=[baseline_state],
-        deletable_sources={"kupibilet_aggregator"},
+        allow_deletes=True,
     )
     assert updated.counts["upd"] == 1
     assert updated.events[0].event_type == RMSEVENT_UPDATE
@@ -182,7 +194,7 @@ async def test_snapshots_to_real_source_events_update_and_delete() -> None:
     deleted = await snapshots_to_real_source_events(
         snapshots=[],
         previous_states=[updated.upserts[0]],
-        deletable_sources={"kupibilet_aggregator"},
+        allow_deletes=True,
     )
     assert deleted.counts["del"] == 1
     assert deleted.events[0].event_type == RMSEVENT_DELETE

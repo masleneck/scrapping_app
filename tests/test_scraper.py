@@ -1,5 +1,6 @@
 from app.models import Direction, FlightStatus
 from app.scraper import (
+    parse_flightaware_airport_regex,
     parse_flights_html,
     parse_flights_html_generic_table,
     parse_kupibilet_embedded_schedule,
@@ -101,3 +102,20 @@ def test_parse_kupibilet_embedded_schedule_extracts_records() -> None:
     assert snapshots[0].direction == Direction.DEP
     assert snapshots[0].scheduled_time is not None
     assert snapshots[0].status == FlightStatus.SCHEDULED
+
+
+def test_parse_flightaware_airport_regex_extracts_flights() -> None:
+    html = """
+    <a href="/live/flight/AFL1975/history/20260301/1530Z/UZTT/UUEE">AFL1975</a>
+    <a href="/live/flight/SDM5956/history/20260301/1345Z/HESH/UUEE">SDM5956</a>
+    """
+    snapshots = parse_flightaware_airport_regex(
+        html=html,
+        source="flightaware_airport_regex",
+        provider="flightaware_airport",
+        strategy="flightaware_airport_regex",
+        source_priority=50,
+    )
+    assert len(snapshots) == 2
+    assert snapshots[0].direction == Direction.ARR
+    assert snapshots[0].normalized_flight_number == "SU1975"

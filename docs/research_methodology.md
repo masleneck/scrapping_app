@@ -9,12 +9,16 @@
 
 ## 3. Методика
 - Сбор данных выполняется периодически (scheduler) и по запросу (`GET /flights/scrape-real`).
-- Для каждого рейса строится стабильный ключ (`source + flight_number + direction + scheduled_time`).
+- Номер рейса нормализуется в единый формат (`normalized_flight_number`).
+- Для каждого экземпляра рейса строится ключ `flight_instance_key`:
+  - `normalized_flight_number + direction + schedule-anchor`.
+- Рейсы из разных источников схлопываются в единый `flight_current` (выбор наиболее актуального снапшота).
 - Текущее состояние сравнивается с сохраненным состоянием (`real_source_state`):
   - новый ключ -> `RMSEVENT_ADD`;
   - ключ есть, но payload изменился -> `RMSEVENT_UPDATE`;
   - ключ исчез при успешном чтении источника -> `RMSEVENT_DELETE`.
 - Статусы чтения источников (`ok/empty/blocked/error`) сохраняются в `real_source_runs`.
+- Для одного и того же источника запускаются альтернативные стратегии парсинга (например, bs4/regex) для сравнительного анализа.
 
 ## 4. Метрики
 - Надежность канала:
@@ -24,7 +28,9 @@
 - Динамика источников:
   - временные ряды по `status` и по `add/upd/del`.
 - Актуальное покрытие:
-  - количество активных рейсов по статусам (`active_by_status`).
+  - количество активных рейсов по статусам (`active_by_status`) в `flight_current`.
+- Сравнение парсеров:
+  - `parser_performance` (`success_rate`, `avg_snapshots`, `add/upd/del` по `provider+strategy`).
 
 ## 5. Протокол эксперимента
 1. Поднять стек (`make up`), применить миграции (`alembic upgrade head`).
@@ -39,6 +45,7 @@
 - `kupibilet_aggregator`: `ok`, ~39 snapshot.
 - `yandex_rasp_aggregator`: `blocked` (captcha/challenge).
 - `tripcom_aggregator`: `blocked/empty` (challenge page).
+- `flightaware_airport` (bs4/regex): `ok`, извлечение записей рейсов с `UUEE`.
 
 Вывод: официальный источник обеспечивает основной объем данных, агрегаторы частично дополняют, но чувствительны к anti-bot механизмам.
 

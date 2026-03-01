@@ -84,11 +84,8 @@ class PostgresEventRepository:
             source = str(row["source"])
             if source_filter and source not in source_filter:
                 continue
-            snapshot_payload = row["snapshot_payload_json"]
-            if isinstance(snapshot_payload, str):
-                payload_data = json.loads(snapshot_payload)
-            else:
-                payload_data = snapshot_payload
+            payload_raw = row["snapshot_payload_json"]
+            payload_data = json.loads(payload_raw) if isinstance(payload_raw, str) else payload_raw
             states.append(
                 {
                     "event_key": row["event_key"],
@@ -145,9 +142,7 @@ class PostgresEventRepository:
                 "event_key": state["event_key"],
                 "source": state["source"],
                 "flight_number": state["flight_number"],
-                "snapshot_payload_json": json.dumps(
-                    state["snapshot_payload"], ensure_ascii=False
-                ),
+                "snapshot_payload_json": json.dumps(state["snapshot_payload"], ensure_ascii=False),
                 "snapshot_hash": state["snapshot_hash"],
                 "last_seen_at": state["last_seen_at"],
                 "is_deleted": bool(state.get("is_deleted", False)),
@@ -185,6 +180,243 @@ class PostgresEventRepository:
             result = await conn.execute(query, params)
         return result.rowcount
 
+    async def upsert_current_flights(self, rows: list[dict[str, Any]]) -> int:
+        if not rows:
+            return 0
+
+        query = text(
+            """
+            INSERT INTO flight_current (
+                flight_instance_key,
+                flight_number,
+                normalized_flight_number,
+                direction,
+                scheduled_time,
+                estimated_time,
+                actual_time,
+                status,
+                terminal,
+                aircraft_type,
+                airline_name,
+                airline_iata,
+                source,
+                provider,
+                strategy,
+                source_priority,
+                source_timestamp,
+                info_url,
+                payload,
+                updated_at
+            )
+            VALUES (
+                :flight_instance_key,
+                :flight_number,
+                :normalized_flight_number,
+                :direction,
+                :scheduled_time,
+                :estimated_time,
+                :actual_time,
+                :status,
+                :terminal,
+                :aircraft_type,
+                :airline_name,
+                :airline_iata,
+                :source,
+                :provider,
+                :strategy,
+                :source_priority,
+                :source_timestamp,
+                :info_url,
+                CAST(:payload_json AS JSONB),
+                :updated_at
+            )
+            ON CONFLICT (flight_instance_key)
+            DO UPDATE SET
+                flight_number = EXCLUDED.flight_number,
+                normalized_flight_number = EXCLUDED.normalized_flight_number,
+                direction = EXCLUDED.direction,
+                scheduled_time = EXCLUDED.scheduled_time,
+                estimated_time = EXCLUDED.estimated_time,
+                actual_time = EXCLUDED.actual_time,
+                status = EXCLUDED.status,
+                terminal = EXCLUDED.terminal,
+                aircraft_type = EXCLUDED.aircraft_type,
+                airline_name = EXCLUDED.airline_name,
+                airline_iata = EXCLUDED.airline_iata,
+                source = EXCLUDED.source,
+                provider = EXCLUDED.provider,
+                strategy = EXCLUDED.strategy,
+                source_priority = EXCLUDED.source_priority,
+                source_timestamp = EXCLUDED.source_timestamp,
+                info_url = EXCLUDED.info_url,
+                payload = EXCLUDED.payload,
+                updated_at = EXCLUDED.updated_at
+            """
+        )
+
+        payload = [
+            {
+                **row,
+                "payload_json": json.dumps(row["payload"], ensure_ascii=False),
+            }
+            for row in rows
+        ]
+
+        async with self.engine.begin() as conn:
+            await conn.execute(query, payload)
+
+        return len(rows)
+
+    async def delete_current_flights(self, flight_instance_keys: list[str]) -> int:
+        if not flight_instance_keys:
+            return 0
+
+        query = text("DELETE FROM flight_current WHERE flight_instance_key = ANY(:keys)")
+        async with self.engine.begin() as conn:
+            result = await conn.execute(query, {"keys": flight_instance_keys})
+        return result.rowcount
+
+    async def list_current_flights(
+        self,
+        *,
+        q: str | None = None,
+        status: str | None = None,
+        provider: str | None = None,
+        source: str | None = None,
+        direction: str | None = None,
+        scheduled_from: datetime | None = None,
+        scheduled_to: datetime | None = None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        where_parts: list[str] = []
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+
+        if q:
+            where_parts.append(
+                """
+                (
+                    normalized_flight_number ILIKE :q
+                    OR flight_number ILIKE :q
+                    OR COALESCE(airline_name, '') ILIKE :q
+                )
+                """
+            )
+            params["q"] = f"%{q.strip().upper()}%"
+        if status:
+            where_parts.append("status = :status")
+            params["status"] = status
+        if provider:
+            where_parts.append("provider = :provider")
+            params["provider"] = provider
+        if source:
+            where_parts.append("source = :source")
+            params["source"] = source
+        if direction:
+            where_parts.append("direction = :direction")
+            params["direction"] = direction
+        if scheduled_from:
+            where_parts.append(
+                "COALESCE(scheduled_time, estimated_time, actual_time) >= :scheduled_from"
+            )
+            params["scheduled_from"] = scheduled_from
+        if scheduled_to:
+            where_parts.append(
+                "COALESCE(scheduled_time, estimated_time, actual_time) <= :scheduled_to"
+            )
+            params["scheduled_to"] = scheduled_to
+
+        where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+
+        query = text(
+            f"""
+            SELECT
+                flight_instance_key,
+                flight_number,
+                normalized_flight_number,
+                direction,
+                scheduled_time,
+                estimated_time,
+                actual_time,
+                status,
+                terminal,
+                aircraft_type,
+                airline_name,
+                airline_iata,
+                source,
+                provider,
+                strategy,
+                source_priority,
+                source_timestamp,
+                info_url,
+                payload::text AS payload_json,
+                updated_at
+            FROM flight_current
+            {where_sql}
+            ORDER BY COALESCE(actual_time, estimated_time, scheduled_time, updated_at) DESC
+            LIMIT :limit OFFSET :offset
+            """
+        )
+
+        count_query = text(f"SELECT COUNT(*)::bigint AS total FROM flight_current {where_sql}")
+
+        async with self.engine.connect() as conn:
+            rows = (await conn.execute(query, params)).mappings().all()
+            total = (await conn.execute(count_query, params)).mappings().one()["total"]
+            filter_rows = (
+                await conn.execute(
+                    text(
+                        """
+                        SELECT
+                            array_remove(
+                                array_agg(DISTINCT status ORDER BY status), NULL
+                            ) AS statuses,
+                            array_remove(
+                                array_agg(DISTINCT provider ORDER BY provider), NULL
+                            ) AS providers,
+                            array_remove(
+                                array_agg(DISTINCT source ORDER BY source), NULL
+                            ) AS sources
+                        FROM flight_current
+                        """
+                    )
+                )
+            ).mappings().one()
+
+        return {
+            "total": int(total),
+            "items": [
+                {
+                    "flight_instance_key": row["flight_instance_key"],
+                    "flight_number": row["flight_number"],
+                    "normalized_flight_number": row["normalized_flight_number"],
+                    "direction": row["direction"],
+                    "scheduled_time": row["scheduled_time"],
+                    "estimated_time": row["estimated_time"],
+                    "actual_time": row["actual_time"],
+                    "status": row["status"],
+                    "terminal": row["terminal"],
+                    "aircraft_type": row["aircraft_type"],
+                    "airline_name": row["airline_name"],
+                    "airline_iata": row["airline_iata"],
+                    "source": row["source"],
+                    "provider": row["provider"],
+                    "strategy": row["strategy"],
+                    "source_priority": row["source_priority"],
+                    "source_timestamp": row["source_timestamp"],
+                    "info_url": row["info_url"],
+                    "payload": json.loads(row["payload_json"]) if row["payload_json"] else {},
+                    "updated_at": row["updated_at"],
+                }
+                for row in rows
+            ],
+            "filters": {
+                "statuses": list(filter_rows["statuses"] or []),
+                "providers": list(filter_rows["providers"] or []),
+                "sources": list(filter_rows["sources"] or []),
+            },
+        }
+
     async def save_real_source_run_reports(self, reports: list[dict[str, Any]]) -> int:
         if not reports:
             return 0
@@ -195,6 +427,8 @@ class PostgresEventRepository:
                 run_id,
                 trigger,
                 source,
+                provider,
+                strategy,
                 status,
                 snapshots,
                 blocked_markers,
@@ -211,6 +445,8 @@ class PostgresEventRepository:
                 :run_id,
                 :trigger,
                 :source,
+                :provider,
+                :strategy,
                 :status,
                 :snapshots,
                 CAST(:blocked_markers_json AS JSONB),
@@ -230,10 +466,13 @@ class PostgresEventRepository:
                 "run_id": report["run_id"],
                 "trigger": report["trigger"],
                 "source": report["source"],
+                "provider": report.get("provider") or "",
+                "strategy": report.get("strategy") or "",
                 "status": report["status"],
                 "snapshots": int(report.get("snapshots") or 0),
                 "blocked_markers_json": json.dumps(
-                    report.get("blocked_markers") or [], ensure_ascii=False
+                    report.get("blocked_markers") or [],
+                    ensure_ascii=False,
                 ),
                 "error": report.get("error"),
                 "add_count": int(report.get("add_count") or 0),
@@ -252,7 +491,7 @@ class PostgresEventRepository:
 
     async def get_real_source_stats(self, hours: int = 24) -> dict[str, Any]:
         window_hours = max(1, hours)
-        params = {"hours": window_hours}
+        params = {"hours": window_hours, "event_types": list(REAL_CHANGE_EVENT_TYPES)}
 
         async with self.engine.connect() as conn:
             total_row = (
@@ -289,6 +528,8 @@ class PostgresEventRepository:
                         """
                         SELECT DISTINCT ON (source)
                             source,
+                            provider,
+                            strategy,
                             status,
                             snapshots,
                             add_count,
@@ -311,12 +552,14 @@ class PostgresEventRepository:
                         SELECT
                             date_trunc('hour', finished_at) AS bucket,
                             source,
+                            provider,
+                            strategy,
                             status,
                             COUNT(*)::bigint AS total
                         FROM real_source_runs
                         WHERE finished_at >= NOW() - (:hours * INTERVAL '1 hour')
-                        GROUP BY bucket, source, status
-                        ORDER BY bucket ASC, source ASC, status ASC
+                        GROUP BY bucket, source, provider, strategy, status
+                        ORDER BY bucket ASC, provider ASC, strategy ASC, status ASC
                         """
                     ),
                     params,
@@ -346,7 +589,7 @@ class PostgresEventRepository:
                         ORDER BY source ASC
                         """
                     ),
-                    {**params, "event_types": list(REAL_CHANGE_EVENT_TYPES)},
+                    params,
                 )
             ).mappings().all()
 
@@ -355,15 +598,37 @@ class PostgresEventRepository:
                     text(
                         """
                         SELECT
-                            source,
-                            COALESCE(snapshot_payload->>'status', 'UNKNOWN') AS status,
+                            provider,
+                            status,
                             COUNT(*)::bigint AS total
-                        FROM real_source_state
-                        WHERE is_deleted = FALSE
-                        GROUP BY source, COALESCE(snapshot_payload->>'status', 'UNKNOWN')
-                        ORDER BY source ASC, status ASC
+                        FROM flight_current
+                        GROUP BY provider, status
+                        ORDER BY provider ASC, status ASC
                         """
                     )
+                )
+            ).mappings().all()
+
+            parser_rows = (
+                await conn.execute(
+                    text(
+                        """
+                        SELECT
+                            provider,
+                            strategy,
+                            COUNT(*)::bigint AS total_runs,
+                            SUM(CASE WHEN success THEN 1 ELSE 0 END)::bigint AS success_runs,
+                            AVG(snapshots)::double precision AS avg_snapshots,
+                            SUM(add_count)::bigint AS add_total,
+                            SUM(upd_count)::bigint AS upd_total,
+                            SUM(del_count)::bigint AS del_total
+                        FROM real_source_runs
+                        WHERE finished_at >= NOW() - (:hours * INTERVAL '1 hour')
+                        GROUP BY provider, strategy
+                        ORDER BY provider ASC, strategy ASC
+                        """
+                    ),
+                    params,
                 )
             ).mappings().all()
 
@@ -377,6 +642,8 @@ class PostgresEventRepository:
             "latest_by_source": [
                 {
                     "source": row["source"],
+                    "provider": row["provider"],
+                    "strategy": row["strategy"],
                     "status": row["status"],
                     "snapshots": int(row["snapshots"]),
                     "add_count": int(row["add_count"]),
@@ -392,6 +659,8 @@ class PostgresEventRepository:
                 {
                     "bucket": row["bucket"],
                     "source": row["source"],
+                    "provider": row["provider"],
+                    "strategy": row["strategy"],
                     "status": row["status"],
                     "total": int(row["total"]),
                 }
@@ -408,13 +677,43 @@ class PostgresEventRepository:
             ],
             "active_by_status": [
                 {
-                    "source": row["source"],
+                    "provider": row["provider"],
                     "status": row["status"],
                     "total": int(row["total"]),
                 }
                 for row in active_rows
             ],
+            "parser_performance": [
+                {
+                    "provider": row["provider"],
+                    "strategy": row["strategy"],
+                    "total_runs": int(row["total_runs"]),
+                    "success_runs": int(row["success_runs"]),
+                    "success_rate": (
+                        float(row["success_runs"]) / float(row["total_runs"])
+                        if row["total_runs"]
+                        else 0.0
+                    ),
+                    "avg_snapshots": round(float(row["avg_snapshots"] or 0.0), 2),
+                    "add_total": int(row["add_total"]),
+                    "upd_total": int(row["upd_total"]),
+                    "del_total": int(row["del_total"]),
+                }
+                for row in parser_rows
+            ],
         }
+
+    async def cleanup_real_data(self) -> None:
+        async with self.engine.begin() as conn:
+            await conn.execute(text("DELETE FROM flight_current"))
+            await conn.execute(text("DELETE FROM real_source_state"))
+            await conn.execute(text("DELETE FROM real_source_runs"))
+            await conn.execute(
+                text(
+                    "DELETE FROM flight_events WHERE event_type = ANY(:event_types)"
+                ),
+                {"event_types": list(REAL_CHANGE_EVENT_TYPES)},
+            )
 
     async def create_event(self, event: FlightEvent) -> StoredFlightEvent:
         query = text(
