@@ -1,5 +1,5 @@
 from app.models import Direction, FlightStatus
-from app.scraper import parse_flights_html
+from app.scraper import parse_flights_html, parse_flights_html_generic_table
 
 
 def test_parse_flights_html_extracts_rows() -> None:
@@ -23,3 +23,28 @@ def test_parse_flights_html_extracts_rows() -> None:
     assert snapshots[0].status == FlightStatus.DELAYED
     assert snapshots[1].direction == Direction.DEP
     assert snapshots[1].status == FlightStatus.BOARDING
+
+
+def test_parse_flights_html_generic_table_headers() -> None:
+    html = """
+    <table>
+      <thead>
+        <tr>
+          <th>Flight</th><th>Direction</th><th>Scheduled</th><th>Status</th><th>Terminal</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>AF123</td><td>ARRIVAL</td><td>2026-03-01 12:00</td><td>LANDED</td><td>D</td>
+        </tr>
+      </tbody>
+    </table>
+    """
+
+    snapshots = parse_flights_html_generic_table(html=html, source="real_test")
+
+    assert len(snapshots) == 1
+    assert snapshots[0].flight_number == "AF123"
+    assert snapshots[0].direction == Direction.ARR
+    assert snapshots[0].status == FlightStatus.LANDED
+    assert snapshots[0].terminal == "D"

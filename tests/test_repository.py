@@ -109,3 +109,43 @@ async def test_repository_crud_flow(repository: PostgresEventRepository) -> None
     assert updated.payload["status"] == "DELAYED"
     assert deleted is True
     assert after_delete is None
+
+
+async def test_repository_stats(repository: PostgresEventRepository) -> None:
+    source = f"pytest_stats_{uuid.uuid4().hex}"
+    events = [
+        FlightEvent(
+            event_type="FLIGHT_DISCOVERED",
+            flight_number="SU100",
+            payload={"status": "SCHEDULED"},
+            confidence_score=0.91,
+            observed_at=datetime(2026, 3, 1, 12, 0, tzinfo=UTC),
+            source=source,
+        ),
+        FlightEvent(
+            event_type="FLIGHT_STATUS_UPDATED",
+            flight_number="SU100",
+            payload={"status": "DELAYED"},
+            confidence_score=0.94,
+            observed_at=datetime(2026, 3, 1, 12, 5, tzinfo=UTC),
+            source=source,
+        ),
+        FlightEvent(
+            event_type="FLIGHT_STATUS_UPDATED",
+            flight_number="SU245",
+            payload={"status": "BOARDING"},
+            confidence_score=0.9,
+            observed_at=datetime(2026, 3, 1, 12, 10, tzinfo=UTC),
+            source=source,
+        ),
+    ]
+
+    try:
+        await repository.save_events(events)
+        stats = await repository.get_events_stats(source=source, top_flights_limit=2)
+    finally:
+        await _cleanup_by_source(repository, source)
+
+    assert stats["total_events"] == 3
+    assert stats["by_event_type"][0]["event_type"] == "FLIGHT_STATUS_UPDATED"
+    assert stats["top_flights"][0]["flight_number"] == "SU100"

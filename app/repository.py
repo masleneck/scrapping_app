@@ -131,26 +131,15 @@ class PostgresEventRepository:
         observed_from: datetime | None = None,
         observed_to: datetime | None = None,
     ) -> list[StoredFlightEvent]:
-        where_clauses: list[str] = []
-        params: dict[str, Any] = {"limit": limit, "offset": offset}
+        where_sql, params = _build_filters(
+            flight_number=flight_number,
+            event_type=event_type,
+            source=source,
+            observed_from=observed_from,
+            observed_to=observed_to,
+            extra={"limit": limit, "offset": offset},
+        )
 
-        if flight_number:
-            where_clauses.append("flight_number = :flight_number")
-            params["flight_number"] = flight_number
-        if event_type:
-            where_clauses.append("event_type = :event_type")
-            params["event_type"] = event_type
-        if source:
-            where_clauses.append("source = :source")
-            params["source"] = source
-        if observed_from:
-            where_clauses.append("observed_at >= :observed_from")
-            params["observed_from"] = observed_from
-        if observed_to:
-            where_clauses.append("observed_at <= :observed_to")
-            params["observed_to"] = observed_to
-
-        where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
         query = text(
             f"""
             SELECT
@@ -172,6 +161,93 @@ class PostgresEventRepository:
             rows = (await conn.execute(query, params)).mappings().all()
 
         return [self._map_row(row) for row in rows]
+
+    async def get_events_stats(
+        self,
+        flight_number: str | None = None,
+        event_type: str | None = None,
+        source: str | None = None,
+        observed_from: datetime | None = None,
+        observed_to: datetime | None = None,
+        top_flights_limit: int = 5,
+    ) -> dict[str, Any]:
+        where_sql, base_params = _build_filters(
+            flight_number=flight_number,
+            event_type=event_type,
+            source=source,
+            observed_from=observed_from,
+            observed_to=observed_to,
+        )
+
+        async with self.engine.connect() as conn:
+            total_row = (
+                await conn.execute(
+                    text(f"SELECT COUNT(*)::bigint AS total_events FROM flight_events {where_sql}"),
+                    base_params,
+                )
+            ).mappings().one()
+
+            by_type_rows = (
+                await conn.execute(
+                    text(
+                        f"""
+                        SELECT event_type, COUNT(*)::bigint AS total
+                        FROM flight_events
+                        {where_sql}
+                        GROUP BY event_type
+                        ORDER BY total DESC, event_type ASC
+                        """
+                    ),
+                    base_params,
+                )
+            ).mappings().all()
+
+            by_source_rows = (
+                await conn.execute(
+                    text(
+                        f"""
+                        SELECT source, COUNT(*)::bigint AS total
+                        FROM flight_events
+                        {where_sql}
+                        GROUP BY source
+                        ORDER BY total DESC, source ASC
+                        """
+                    ),
+                    base_params,
+                )
+            ).mappings().all()
+
+            top_params = {**base_params, "top_flights_limit": top_flights_limit}
+            top_flights_rows = (
+                await conn.execute(
+                    text(
+                        f"""
+                        SELECT flight_number, COUNT(*)::bigint AS total
+                        FROM flight_events
+                        {where_sql}
+                        GROUP BY flight_number
+                        ORDER BY total DESC, flight_number ASC
+                        LIMIT :top_flights_limit
+                        """
+                    ),
+                    top_params,
+                )
+            ).mappings().all()
+
+        return {
+            "total_events": int(total_row["total_events"]),
+            "by_event_type": [
+                {"event_type": row["event_type"], "total": int(row["total"])}
+                for row in by_type_rows
+            ],
+            "by_source": [
+                {"source": row["source"], "total": int(row["total"])} for row in by_source_rows
+            ],
+            "top_flights": [
+                {"flight_number": row["flight_number"], "total": int(row["total"])}
+                for row in top_flights_rows
+            ],
+        }
 
     async def update_event(
         self,
@@ -256,3 +332,37 @@ class PostgresEventRepository:
             observed_at=row["observed_at"],
             source=row["source"],
         )
+
+
+def _build_filters(
+    flight_number: str | None = None,
+    event_type: str | None = None,
+    source: str | None = None,
+    observed_from: datetime | None = None,
+    observed_to: datetime | None = None,
+    extra: dict[str, Any] | None = None,
+) -> tuple[str, dict[str, Any]]:
+    where_clauses: list[str] = []
+    params: dict[str, Any] = {}
+
+    if flight_number:
+        where_clauses.append("flight_number = :flight_number")
+        params["flight_number"] = flight_number
+    if event_type:
+        where_clauses.append("event_type = :event_type")
+        params["event_type"] = event_type
+    if source:
+        where_clauses.append("source = :source")
+        params["source"] = source
+    if observed_from:
+        where_clauses.append("observed_at >= :observed_from")
+        params["observed_from"] = observed_from
+    if observed_to:
+        where_clauses.append("observed_at <= :observed_to")
+        params["observed_to"] = observed_to
+
+    if extra:
+        params.update(extra)
+
+    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+    return where_sql, params
