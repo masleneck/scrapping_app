@@ -24,6 +24,13 @@ def _load_env_file(path: str = ".env") -> None:
 _load_env_file()
 
 
+def _get_bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(slots=True)
 class Settings:
     source_url: str = os.getenv("SOURCE_URL", "http://localhost:8080/flights.html")
@@ -31,6 +38,14 @@ class Settings:
     database_url: str = os.getenv(
         "DATABASE_URL",
         "postgresql+asyncpg://scrapping:scrapping@localhost:5432/scrapping_app",
+    )
+    real_scrape_scheduler_enabled: bool = _get_bool_env(
+        "REAL_SCRAPE_SCHEDULER_ENABLED", True
+    )
+    real_scrape_interval_seconds: int = int(os.getenv("REAL_SCRAPE_INTERVAL_SECONDS", "300"))
+    real_scrape_retry_attempts: int = int(os.getenv("REAL_SCRAPE_RETRY_ATTEMPTS", "3"))
+    real_scrape_retry_backoff_seconds: float = float(
+        os.getenv("REAL_SCRAPE_RETRY_BACKOFF_SECONDS", "1.0")
     )
 
     def get_source_urls(self) -> list[str]:

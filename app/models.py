@@ -33,7 +33,10 @@ class FlightSnapshot(BaseModel):
 
 class FlightEvent(BaseModel):
     event_type: str = Field(
-        description="FLIGHT_DISCOVERED | FLIGHT_TIME_UPDATED | FLIGHT_STATUS_UPDATED"
+        description=(
+            "FLIGHT_DISCOVERED | FLIGHT_TIME_UPDATED | FLIGHT_STATUS_UPDATED | "
+            "RMSEVENT_ADD | RMSEVENT_UPDATE | RMSEVENT_DELETE"
+        )
     )
     flight_number: str
     payload: dict
@@ -48,7 +51,10 @@ class StoredFlightEvent(FlightEvent):
 
 class FlightEventCreate(BaseModel):
     event_type: str = Field(
-        description="FLIGHT_DISCOVERED | FLIGHT_TIME_UPDATED | FLIGHT_STATUS_UPDATED"
+        description=(
+            "FLIGHT_DISCOVERED | FLIGHT_TIME_UPDATED | FLIGHT_STATUS_UPDATED | "
+            "RMSEVENT_ADD | RMSEVENT_UPDATE | RMSEVENT_DELETE"
+        )
     )
     flight_number: str
     payload: dict

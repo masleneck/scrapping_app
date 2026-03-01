@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.models import FlightEvent, StoredFlightEvent
+
+REAL_CHANGE_EVENT_TYPES = ("RMSEVENT_ADD", "RMSEVENT_UPDATE", "RMSEVENT_DELETE")
 
 
 class PostgresEventRepository:
@@ -54,6 +56,365 @@ class PostgresEventRepository:
             await conn.execute(query, payload)
 
         return len(events)
+
+    async def get_real_source_states(
+        self,
+        sources: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        query = text(
+            """
+            SELECT
+                event_key,
+                source,
+                flight_number,
+                snapshot_payload::text AS snapshot_payload_json,
+                snapshot_hash,
+                last_seen_at,
+                is_deleted
+            FROM real_source_state
+            WHERE is_deleted = FALSE
+            """
+        )
+        async with self.engine.connect() as conn:
+            rows = (await conn.execute(query)).mappings().all()
+
+        source_filter = set(sources or [])
+        states: list[dict[str, Any]] = []
+        for row in rows:
+            source = str(row["source"])
+            if source_filter and source not in source_filter:
+                continue
+            snapshot_payload = row["snapshot_payload_json"]
+            if isinstance(snapshot_payload, str):
+                payload_data = json.loads(snapshot_payload)
+            else:
+                payload_data = snapshot_payload
+            states.append(
+                {
+                    "event_key": row["event_key"],
+                    "source": source,
+                    "flight_number": row["flight_number"],
+                    "snapshot_payload": payload_data,
+                    "snapshot_hash": row["snapshot_hash"],
+                    "last_seen_at": row["last_seen_at"],
+                    "is_deleted": bool(row["is_deleted"]),
+                }
+            )
+        return states
+
+    async def upsert_real_source_states(self, states: list[dict[str, Any]]) -> int:
+        if not states:
+            return 0
+
+        query = text(
+            """
+            INSERT INTO real_source_state (
+                event_key,
+                source,
+                flight_number,
+                snapshot_payload,
+                snapshot_hash,
+                last_seen_at,
+                is_deleted,
+                deleted_at
+            )
+            VALUES (
+                :event_key,
+                :source,
+                :flight_number,
+                CAST(:snapshot_payload_json AS JSONB),
+                :snapshot_hash,
+                :last_seen_at,
+                :is_deleted,
+                :deleted_at
+            )
+            ON CONFLICT (event_key)
+            DO UPDATE SET
+                source = EXCLUDED.source,
+                flight_number = EXCLUDED.flight_number,
+                snapshot_payload = EXCLUDED.snapshot_payload,
+                snapshot_hash = EXCLUDED.snapshot_hash,
+                last_seen_at = EXCLUDED.last_seen_at,
+                is_deleted = EXCLUDED.is_deleted,
+                deleted_at = EXCLUDED.deleted_at,
+                updated_at = NOW()
+            """
+        )
+        payload = [
+            {
+                "event_key": state["event_key"],
+                "source": state["source"],
+                "flight_number": state["flight_number"],
+                "snapshot_payload_json": json.dumps(
+                    state["snapshot_payload"], ensure_ascii=False
+                ),
+                "snapshot_hash": state["snapshot_hash"],
+                "last_seen_at": state["last_seen_at"],
+                "is_deleted": bool(state.get("is_deleted", False)),
+                "deleted_at": (
+                    state["last_seen_at"] if bool(state.get("is_deleted", False)) else None
+                ),
+            }
+            for state in states
+        ]
+
+        async with self.engine.begin() as conn:
+            await conn.execute(query, payload)
+        return len(states)
+
+    async def mark_real_source_states_deleted(
+        self,
+        event_keys: list[str],
+        deleted_at: datetime | None = None,
+    ) -> int:
+        if not event_keys:
+            return 0
+
+        query = text(
+            """
+            UPDATE real_source_state
+            SET
+                is_deleted = TRUE,
+                deleted_at = :deleted_at,
+                updated_at = NOW()
+            WHERE event_key = ANY(:event_keys) AND is_deleted = FALSE
+            """
+        )
+        params = {"event_keys": event_keys, "deleted_at": deleted_at or datetime.now(UTC)}
+        async with self.engine.begin() as conn:
+            result = await conn.execute(query, params)
+        return result.rowcount
+
+    async def save_real_source_run_reports(self, reports: list[dict[str, Any]]) -> int:
+        if not reports:
+            return 0
+
+        query = text(
+            """
+            INSERT INTO real_source_runs (
+                run_id,
+                trigger,
+                source,
+                status,
+                snapshots,
+                blocked_markers,
+                error,
+                add_count,
+                upd_count,
+                del_count,
+                unchanged_count,
+                success,
+                started_at,
+                finished_at
+            )
+            VALUES (
+                :run_id,
+                :trigger,
+                :source,
+                :status,
+                :snapshots,
+                CAST(:blocked_markers_json AS JSONB),
+                :error,
+                :add_count,
+                :upd_count,
+                :del_count,
+                :unchanged_count,
+                :success,
+                :started_at,
+                :finished_at
+            )
+            """
+        )
+        payload = [
+            {
+                "run_id": report["run_id"],
+                "trigger": report["trigger"],
+                "source": report["source"],
+                "status": report["status"],
+                "snapshots": int(report.get("snapshots") or 0),
+                "blocked_markers_json": json.dumps(
+                    report.get("blocked_markers") or [], ensure_ascii=False
+                ),
+                "error": report.get("error"),
+                "add_count": int(report.get("add_count") or 0),
+                "upd_count": int(report.get("upd_count") or 0),
+                "del_count": int(report.get("del_count") or 0),
+                "unchanged_count": int(report.get("unchanged_count") or 0),
+                "success": bool(report.get("success", False)),
+                "started_at": report["started_at"],
+                "finished_at": report["finished_at"],
+            }
+            for report in reports
+        ]
+        async with self.engine.begin() as conn:
+            await conn.execute(query, payload)
+        return len(reports)
+
+    async def get_real_source_stats(self, hours: int = 24) -> dict[str, Any]:
+        window_hours = max(1, hours)
+        params = {"hours": window_hours}
+
+        async with self.engine.connect() as conn:
+            total_row = (
+                await conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(*)::bigint AS total_runs
+                        FROM real_source_runs
+                        WHERE finished_at >= NOW() - (:hours * INTERVAL '1 hour')
+                        """
+                    ),
+                    params,
+                )
+            ).mappings().one()
+
+            status_rows = (
+                await conn.execute(
+                    text(
+                        """
+                        SELECT status, COUNT(*)::bigint AS total
+                        FROM real_source_runs
+                        WHERE finished_at >= NOW() - (:hours * INTERVAL '1 hour')
+                        GROUP BY status
+                        ORDER BY total DESC, status ASC
+                        """
+                    ),
+                    params,
+                )
+            ).mappings().all()
+
+            latest_rows = (
+                await conn.execute(
+                    text(
+                        """
+                        SELECT DISTINCT ON (source)
+                            source,
+                            status,
+                            snapshots,
+                            add_count,
+                            upd_count,
+                            del_count,
+                            unchanged_count,
+                            success,
+                            finished_at
+                        FROM real_source_runs
+                        ORDER BY source, finished_at DESC
+                        """
+                    )
+                )
+            ).mappings().all()
+
+            timeline_rows = (
+                await conn.execute(
+                    text(
+                        """
+                        SELECT
+                            date_trunc('hour', finished_at) AS bucket,
+                            source,
+                            status,
+                            COUNT(*)::bigint AS total
+                        FROM real_source_runs
+                        WHERE finished_at >= NOW() - (:hours * INTERVAL '1 hour')
+                        GROUP BY bucket, source, status
+                        ORDER BY bucket ASC, source ASC, status ASC
+                        """
+                    ),
+                    params,
+                )
+            ).mappings().all()
+
+            change_rows = (
+                await conn.execute(
+                    text(
+                        """
+                        SELECT
+                            source,
+                            SUM(
+                                CASE WHEN event_type = 'RMSEVENT_ADD' THEN 1 ELSE 0 END
+                            )::bigint AS add_total,
+                            SUM(
+                                CASE WHEN event_type = 'RMSEVENT_UPDATE' THEN 1 ELSE 0 END
+                            )::bigint AS upd_total,
+                            SUM(
+                                CASE WHEN event_type = 'RMSEVENT_DELETE' THEN 1 ELSE 0 END
+                            )::bigint AS del_total
+                        FROM flight_events
+                        WHERE
+                            observed_at >= NOW() - (:hours * INTERVAL '1 hour')
+                            AND event_type = ANY(:event_types)
+                        GROUP BY source
+                        ORDER BY source ASC
+                        """
+                    ),
+                    {**params, "event_types": list(REAL_CHANGE_EVENT_TYPES)},
+                )
+            ).mappings().all()
+
+            active_rows = (
+                await conn.execute(
+                    text(
+                        """
+                        SELECT
+                            source,
+                            COALESCE(snapshot_payload->>'status', 'UNKNOWN') AS status,
+                            COUNT(*)::bigint AS total
+                        FROM real_source_state
+                        WHERE is_deleted = FALSE
+                        GROUP BY source, COALESCE(snapshot_payload->>'status', 'UNKNOWN')
+                        ORDER BY source ASC, status ASC
+                        """
+                    )
+                )
+            ).mappings().all()
+
+        return {
+            "window_hours": window_hours,
+            "total_runs": int(total_row["total_runs"]),
+            "runs_by_status": [
+                {"status": row["status"], "total": int(row["total"])}
+                for row in status_rows
+            ],
+            "latest_by_source": [
+                {
+                    "source": row["source"],
+                    "status": row["status"],
+                    "snapshots": int(row["snapshots"]),
+                    "add_count": int(row["add_count"]),
+                    "upd_count": int(row["upd_count"]),
+                    "del_count": int(row["del_count"]),
+                    "unchanged_count": int(row["unchanged_count"]),
+                    "success": bool(row["success"]),
+                    "finished_at": row["finished_at"],
+                }
+                for row in latest_rows
+            ],
+            "timeline": [
+                {
+                    "bucket": row["bucket"],
+                    "source": row["source"],
+                    "status": row["status"],
+                    "total": int(row["total"]),
+                }
+                for row in timeline_rows
+            ],
+            "changes_by_source": [
+                {
+                    "source": row["source"],
+                    "add_total": int(row["add_total"]),
+                    "upd_total": int(row["upd_total"]),
+                    "del_total": int(row["del_total"]),
+                }
+                for row in change_rows
+            ],
+            "active_by_status": [
+                {
+                    "source": row["source"],
+                    "status": row["status"],
+                    "total": int(row["total"]),
+                }
+                for row in active_rows
+            ],
+        }
 
     async def create_event(self, event: FlightEvent) -> StoredFlightEvent:
         query = text(
