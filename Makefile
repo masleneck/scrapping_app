@@ -1,6 +1,6 @@
 PYTHON ?= python
 
-.PHONY: install lint format test run up down logs db-upgrade db-downgrade db-history
+.PHONY: install lint format test run build up down logs db-upgrade db-downgrade db-history
 
 install:
 	$(PYTHON) -m pip install --upgrade pip
@@ -19,8 +19,11 @@ test:
 run:
 	uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
+build:
+	docker compose build
+
 up:
-	docker compose up --build -d postgres mock-source app
+	docker compose up -d postgres mock-source app
 
 down:
 	docker compose down
